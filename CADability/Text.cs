@@ -485,6 +485,7 @@ namespace CADability.GeoObject
         {
             public CompoundShape shape; // hat die Splines statt der Polygone
             public IPaintTo3DList list;
+            public bool listCreated; // true, when a display list has been created for this glyph with a IPaintTo3D. The list may still be null (space, or the glyph could not be painted at all)
             public double width;
         }
         struct CenterLineVal
@@ -520,58 +521,9 @@ namespace CADability.GeoObject
         {
             Gdi.DeleteDC(hDC);
         }
-        private void AddToPath2D(List<ICurve2D> addto, List<GeoPoint2D> points, bool spline, bool close)
-        {
-            if (spline)
-            {
-                for (int i = 0; i < points.Count - 3; i += 3)
-                {
-
-                    double[] knots = new double[2];
-                    int[] multiplicities = new int[2];
-                    knots[0] = 0;
-                    knots[1] = 1;
-                    multiplicities[0] = 4;
-                    multiplicities[1] = 4;
-                    GeoPoint2D[] pp = new GeoPoint2D[4];
-                    points.CopyTo(i, pp, 0, 4);
-                    BSpline2D bsp = new BSpline2D(pp, null, knots, multiplicities, 3, false, 0.0, 1.0);
-                    // addto.Add(bsp);
-                    switch (FontPrecision)
-                    {
-                        case 0: // grob
-                            addto.Add(bsp.Approximate(true, 0.2));
-                            break;
-                        case 1: // mittel
-                            addto.Add(bsp.Approximate(true, 0.05));
-                            break;
-                        case 2:
-                            // addto.Add(bsp.Approximate(true, 0.005));
-                            addto.Add(bsp); // wenn man den BSpline selbst zufügt, dann könnte man auch mit dynamischer Auflösung arbeiten
-                            break;
-                    }
-                }
-            }
-            else
-            {
-                try
-                {
-                    if (points.Count > 1)
-                    {
-                        if (points.Count > 2 || points[0] != points[1])
-                        {   // zwei identische Punkte gibt exception und ist langsam. Deshalb hier ausschließen
-                            Polyline2D pl = new Polyline2D(points.ToArray());
-                            addto.Add(pl);
-                        }
-                    }
-                }
-                catch (Polyline2DException) { } // nur zwei identische Punkte
-            }
-            points.RemoveRange(0, points.Count - 1); // den letzten als ersten drinlassen
-        }
         public Path2D[] GetOutline2D(string fontName, int fontStyle, char c, out double width)
         {
-            GraphicsPath path = new GraphicsPath();
+            using GraphicsPath path = new GraphicsPath();
             // FontFamily wraps an unmanaged GDI+ object: dispose it at the end of the block instead of
             // leaving it to the finalizer (this code runs for every text on every repaint)
             using FontFamily ff = Text.FontFamilyNames.Contains(fontName.ToUpper()) ? new FontFamily(fontName) : new FontFamily(System.Drawing.Text.GenericFontFamilies.SansSerif);
@@ -618,120 +570,8 @@ namespace CADability.GeoObject
             width = (abc[0].abcA + abc[0].abcB + abc[0].abcC) / (double)em;
 
             path.AddString(c.ToString(), ff, fs, 1.0f, new PointF(0.0f, 0.0f), sf);
-            List<Path2D> res = new List<Path2D>();
-            if (path.PointCount > 0)
-            {
-                List<PointF> pp = new List<PointF>(path.PathPoints);
-                List<byte> pt = new List<byte>(path.PathTypes);
-                int last0 = -1;
-                for (int i = 0; i < pt.Count; ++i)
-                {
-                    pp[i] = new PointF(pp[i].X, (float)(1.0f - pp[i].Y));
-                    if ((pt[i] & 0x01) == 0) last0 = i;
-                    if ((pt[i] & 0x80) != 0 && last0 >= 0)
-                    {
-                        pt[i] = (byte)(pt[i] & 0x7F);
-                        pt.Insert(i + 1, (byte)(pt[last0] | 0x81));
-                        pp.Insert(i + 1, pp[last0]);
-                        ++i;
-                        last0 = -1;
-                    }
-
-                }
-                if (pp == null || pp.Count == 0)
-                {
-                    return res.ToArray();
-                }
-                List<GeoPoint2D> current = new List<GeoPoint2D>();
-                int mode = 0; // 0 noch nicht bekannt, 1: Linie, 3 Spline
-                GeoPoint2D startPoint = GeoPoint2D.Origin;
-                List<ICurve2D> segment = new List<ICurve2D>();
-                bool close = false;
-                for (int i = 0; i < pp.Count; ++i)
-                {
-                    switch (pt[i] & 0x03)
-                    {
-                        case 0: // neuer Anfang
-                            if (current.Count > 1)
-                            {
-                                AddToPath2D(segment, current, mode == 3, close);
-                                res.Add(new Path2D(segment.ToArray()));
-                            }
-                            segment.Clear();
-                            current.Clear();
-                            current.Add(new GeoPoint2D(pp[i]));
-                            mode = 0;
-                            break;
-                        case 1:
-                            if (mode == 3)
-                            {   // Spline beenden, polylinie anfangen
-                                AddToPath2D(segment, current, true, false);
-                            }
-                            current.Add(new GeoPoint2D(pp[i]));
-                            mode = 1;
-                            break;
-                        case 2:
-                        case 3:
-                            if (mode == 1)
-                            {
-                                AddToPath2D(segment, current, false, false);
-                            }
-                            current.Add(new GeoPoint2D(pp[i]));
-                            mode = 3;
-                            break;
-                    }
-                    close = (pt[i] & 0x80) != 0;
-                }
-
-                if (current.Count > 1)
-                {
-                    AddToPath2D(segment, current, mode == 3, close);
-                    res.Add(new Path2D(segment.ToArray()));
-                }
-            }
-            //BoundingRect ext = BoundingRect.EmptyBoundingRect;
-            //ext.MinMax(GeoPoint2D.Origin); // Ursprung mit einbezogen, ist das OK?
-            //for (int i = 0; i < res.Count; ++i)
-            //{
-            //    ext.MinMax(res[i].GetExtent());
-            //}
-            //ll = ext.GetLowerLeft();
-            //lr = ext.GetLowerRight();
-            //ul = ext.GetUpperLeft();
-            //ModOp2D m = ModOp2D.Scale(1.0 / em);
-            //if (this.lineAlignment != LineAlignMode.Left || this.alignment != AlignMode.Bottom)
-            //{
-            //    int ls = ff.GetLineSpacing((FontStyle)fs);
-            //    int dc = ff.GetCellDescent((FontStyle)fs);
-            //    double dx = 0.0;
-            //    double dy = 0.0;
-            //    switch (lineAlignment)
-            //    {
-            //        case LineAlignMode.Center: dx = -ext.Width / 2.0; break;
-            //        case LineAlignMode.Right: dx = -ext.Width; break;
-            //    }
-            //    switch (alignment)
-            //    {
-            //        case AlignMode.Baseline: dy = -dc; break;
-            //        case AlignMode.Center: dy = -em / 2.0; break;
-            //        case AlignMode.Top: dy = -ls; break;
-            //    }
-            //    for (int i = 0; i < res.Count; ++i)
-            //    {
-            //        res[i].Move(dx, dy);
-            //    }
-            //    ll += new GeoVector2D(dx, dy);
-            //    lr += new GeoVector2D(dx, dy);
-            //    ul += new GeoVector2D(dx, dy);
-            //}
-            //for (int i = 0; i < res.Count; ++i)
-            //{
-            //    res[i] = (res[i] as ICurve2D).GetModified(m) as Path2D;
-            //}
-            //ll = m * ll;
-            //lr = m * lr;
-            //ul = m * ul;
-            return res.ToArray();
+            if (path.PointCount == 0) return new Path2D[0];
+            return GlyphShapeBuilder.PathDataToPath2D(path.PathPoints, path.PathTypes, FontPrecision);
         }
         public CompoundShape Get(string font, int fontStyle, char c, out double width)
         {   // soll verschwinden!!
@@ -742,42 +582,7 @@ namespace CADability.GeoObject
                 {
                     found = new DictVal();
                     Path2D[] paths = GetOutline2D(font, fontStyle, c, out width);
-                    SortedDictionary<BoundingRect, List<SimpleShape>> sortedshapes = new SortedDictionary<BoundingRect, List<SimpleShape>>();
-                    for (int i = 0; i < paths.Length; ++i)
-                    {
-                        if (paths[i].IsClosed)
-                        {
-                            SimpleShape ss = new SimpleShape(paths[i].MakeBorder());
-                            var _ssKey = ss.GetExtent();
-                            if (!sortedshapes.ContainsKey(_ssKey)) sortedshapes[_ssKey] = new List<SimpleShape>();
-                            sortedshapes[_ssKey].Add(ss);
-                        }
-                    }
-                    List<SimpleShape> sortedList = new List<SimpleShape>();
-                    foreach (var _e in sortedshapes) sortedList.AddRange(_e.Value);
-                    CompoundShape res = new CompoundShape(); // leer
-                    while (sortedList.Count > 0)
-                    {
-                        SimpleShape ss = sortedList[sortedList.Count - 1]; // das größte
-                        sortedList.RemoveAt(sortedList.Count - 1); // raus aus der Liste
-                        CompoundShape cs = new CompoundShape(ss);
-                        for (int i = sortedList.Count - 1; i >= 0; --i)
-                        {
-                            switch (SimpleShape.GetPosition(ss, sortedList[i]))
-                            {
-                                case SimpleShape.Position.firstcontainscecond:
-                                    cs = cs - new CompoundShape(sortedList[i]);
-                                    sortedList.RemoveAt(i);
-                                    break;
-                                default:
-                                    // alle anderen werden nicht verwendet. Beim Überschneiden müsste man noch überlegen
-                                    // z.B. Font raumTalk
-                                    break;
-                            }
-                        }
-                        res = res + cs;
-                    }
-                    found.shape = res;
+                    found.shape = GlyphShapeBuilder.MakeShape(paths).Shape;
                     double extwidth = found.shape.GetExtent().GetWidth();
                     if (width < extwidth * 0.9) width = extwidth * 1.1;
                     found.width = width; // hier könnte man mit TextRenderer.MeasureText arbeiten, wenns so nicht passt
@@ -806,7 +611,9 @@ namespace CADability.GeoObject
             {
                 if (useLists && cache.TryGetValue(new DictKey(font, fontStyle, c), out found))
                 {
-                    if (found.list != null || paintTo3D == null)
+                    // listCreated: the list may be null (e.g. space, or a glyph that could not be painted at all),
+                    // this result is cached as well, so the failing glyph is not tried again on every repaint
+                    if (found.listCreated || paintTo3D == null)
                     {
                         width = found.width;
                         return found.list;
@@ -821,95 +628,40 @@ namespace CADability.GeoObject
                     paintTo3D.OpenList(font + ":" + c);
                 }
                 found = new DictVal();
-                Path2D[] paths = GetOutline2D(font, fontStyle, c, out width);
-                if (paintTo3D != null)
+                Path2D[] paths = null;
+                width = 0.0;
+                try
                 {
-                    if (displayAsPath)
+                    paths = GetOutline2D(font, fontStyle, c, out width);
+                    if (paintTo3D != null)
                     {
-                        for (int i = 0; i < paths.Length; ++i)
+                        bool painted = false;
+                        if (!displayAsPath)
                         {
-                            IGeoObject go = paths[i].MakeGeoObject(Plane.XYPlane);
-                            go.PaintTo3D(paintTo3D);
-                        }
-                    }
-                    else
-                    {
-                        SortedDictionary<BoundingRect, List<SimpleShape>> sortedshapes = new SortedDictionary<BoundingRect, List<SimpleShape>>();
-                        for (int i = 0; i < paths.Length; ++i)
-                        {
-                            if (paths[i].IsClosed)
-                            {
-                                SimpleShape ss = new SimpleShape(paths[i].MakeBorder());
-                                var _ssKey = ss.GetExtent();
-                                if (!sortedshapes.ContainsKey(_ssKey)) sortedshapes[_ssKey] = new List<SimpleShape>();
-                                sortedshapes[_ssKey].Add(ss);
-                            }
-                        }
-                        List<SimpleShape> sortedList = new List<SimpleShape>();
-                        foreach (var _e in sortedshapes) sortedList.AddRange(_e.Value);
-                        CompoundShape res = new CompoundShape(); // empty
-                        while (sortedList.Count > 0)
-                        {
-                            SimpleShape ss = sortedList[sortedList.Count - 1]; // the biggest shape
-                            sortedList.RemoveAt(sortedList.Count - 1); // remove it from the list
-                            CompoundShape cs = new CompoundShape(ss);
-                            for (int i = sortedList.Count - 1; i >= 0; --i)
-                            {
-                                switch (SimpleShape.GetPosition(ss, sortedList[i]))
-                                {
-                                    case SimpleShape.Position.firstcontainscecond:
-                                        cs = cs - new CompoundShape(sortedList[i]);
-                                        sortedList.RemoveAt(i);
-                                        break;
-                                    default:
-                                        // all shapes must be contained in the outer shape, there should not be overlapping shapes
-                                        // but there is one example with overlapping shapes: Font raumTalk
-                                        break;
-                                }
-                            }
-                            res = res + cs;
-                        }
-                        PlaneSurface pls = new PlaneSurface(Plane.XYPlane);
-                        for (int i = 0; i < res.SimpleShapes.Length; ++i)
-                        {
-                            Face fc = Face.MakeFace(pls, res.SimpleShapes[i]);
-                            fc.ColorDef = null; // no color in the display list!
-                            double oldprecision = paintTo3D.Precision;
-                            switch (FontPrecision) // this is for triangulation precision, font size is 1
-                            {
-                                case 0: // rough
-                                    paintTo3D.Precision = 0.2;
-                                    break;
-                                case 1: // middle
-                                    paintTo3D.Precision = 0.05;
-                                    break;
-                                case 2: // fine
-                                    paintTo3D.Precision = 0.005;
-                                    break;
-                            }
-                            bool oldpse = paintTo3D.PaintSurfaceEdges;
-                            paintTo3D.PaintSurfaceEdges = false;
-                            // glyphs are rendered flat (unlit): text must appear exactly in its
-                            // ColorDef color and not be modified by the scene lighting
-                            IPaintTo3DFlatText flatText = paintTo3D as IPaintTo3DFlatText;
-                            if (flatText != null) flatText.FlatTextMode = true;
                             try
                             {
-                                fc.PaintTo3D(paintTo3D); // will be triangulated according to paintTo3D.Precision
+                                painted = PaintGlyphFaces(paths, paintTo3D);
                             }
-                            finally
-                            {
-                                if (flatText != null) flatText.FlatTextMode = false;
+                            catch (Exception ex) when (!(ex is ThreadAbortException))
+                            {   // a glyph that cannot be triangulated must not take the whole text down
+                                painted = false;
                             }
-                            paintTo3D.Precision = oldprecision;
-                            paintTo3D.PaintSurfaceEdges = oldpse;
+                        }
+                        if (!painted && paths.Length > 0)
+                        {   // either displayAsPath is set or no face could be made from the outline (e.g. overlapping or
+                            // self intersecting contours): show the outline instead of nothing
+                            PaintGlyphOutline(paths, paintTo3D);
                         }
                     }
-                    if (useLists)
-                    {
+                }
+                finally
+                {
+                    if (paintTo3D != null && useLists)
+                    {   // the list must be closed in any case, even if the outline could not be retrieved
                         found.list = paintTo3D.CloseList(); // kann null werden, bei Leerzeichen z.B.
+                        found.listCreated = true;
+                        paintTo3D.SelectMode = oldSelectMode;
                     }
-                    paintTo3D.SelectMode = oldSelectMode;
                 }
                 BoundingRect ext = BoundingRect.EmptyBoundingRect;
                 for (int i = 0; i < paths.Length; ++i)
@@ -927,6 +679,99 @@ namespace CADability.GeoObject
             width = found.width;
             if (useLists) return found.list;
             else return null;
+        }
+        /// <summary>
+        /// Paints the outline paths of a glyph as curves.
+        /// </summary>
+        private static void PaintGlyphOutline(Path2D[] paths, IPaintTo3D paintTo3D)
+        {
+            for (int i = 0; i < paths.Length; ++i)
+            {
+                try
+                {
+                    IGeoObject go = paths[i].MakeGeoObject(Plane.XYPlane);
+                    go.PaintTo3D(paintTo3D);
+                }
+                catch (Exception ex) when (!(ex is ThreadAbortException))
+                {   // a single bad path must not remove the whole glyph
+                }
+            }
+        }
+        /// <summary>
+        /// Builds the filled area of the glyph from its outline paths and paints it as triangulated faces.
+        /// A part of the glyph that yields no triangles is painted by its outline instead.
+        /// </summary>
+        /// <returns>true, when something has been painted, false when no face could be made from the paths</returns>
+        private static bool PaintGlyphFaces(Path2D[] paths, IPaintTo3D paintTo3D)
+        {
+            CompoundShape res = GlyphShapeBuilder.MakeShape(paths).Shape;
+            if (res == null || res.SimpleShapes.Length == 0) return false;
+            PlaneSurface pls = new PlaneSurface(Plane.XYPlane);
+            double precision;
+            switch (FontPrecision) // this is for triangulation precision, font size is 1
+            {
+                case 0: // rough
+                    precision = 0.2;
+                    break;
+                case 2: // fine
+                    precision = 0.005;
+                    break;
+                default: // middle
+                    precision = 0.05;
+                    break;
+            }
+            double oldprecision = paintTo3D.Precision;
+            bool oldpse = paintTo3D.PaintSurfaceEdges;
+            // glyphs are rendered flat (unlit): text must appear exactly in its
+            // ColorDef color and not be modified by the scene lighting
+            IPaintTo3DFlatText flatText = paintTo3D as IPaintTo3DFlatText;
+            bool painted = false;
+            try
+            {
+                paintTo3D.Precision = precision;
+                paintTo3D.PaintSurfaceEdges = false;
+                if (flatText != null) flatText.FlatTextMode = true;
+                for (int i = 0; i < res.SimpleShapes.Length; ++i)
+                {
+                    bool hasTriangles = false;
+                    try
+                    {
+                        Face fc = Face.MakeFace(pls, res.SimpleShapes[i]);
+                        fc.ColorDef = null; // no color in the display list!
+                        // check the triangulation before painting: some glyphs (e.g. "e" of Bahnschrift Light) yield a face without triangles
+                        fc.GetTriangulation(precision, out GeoPoint[] tp, out GeoPoint2D[] tuv, out int[] ti, out BoundingCube te);
+                        if (ti != null && ti.Length >= 3)
+                        {
+                            fc.PaintTo3D(paintTo3D); // uses the triangulation calculated above (same precision)
+                            hasTriangles = true;
+                        }
+                    }
+                    catch (Exception ex) when (!(ex is ThreadAbortException))
+                    {   // this part of the glyph cannot be triangulated, it is painted as outline below
+                    }
+                    if (!hasTriangles)
+                    {   // show at least the outline of this part
+                        List<Path2D> outline = new List<Path2D>();
+                        try
+                        {
+                            outline.Add(res.SimpleShapes[i].Outline.AsPath());
+                            for (int j = 0; j < res.SimpleShapes[i].NumHoles; ++j) outline.Add(res.SimpleShapes[i].Holes[j].AsPath());
+                        }
+                        catch (Exception ex) when (!(ex is ThreadAbortException)) { }
+                        if (flatText != null) flatText.FlatTextMode = false;
+                        PaintGlyphOutline(outline.ToArray(), paintTo3D);
+                        if (flatText != null) flatText.FlatTextMode = true;
+                    }
+                    painted = true;
+                }
+            }
+            finally
+            {
+                if (flatText != null) flatText.FlatTextMode = false;
+                paintTo3D.Precision = oldprecision;
+                paintTo3D.PaintSurfaceEdges = oldpse;
+            }
+            return painted;
         }
         public void Clear()
         {
@@ -946,43 +791,7 @@ namespace CADability.GeoObject
                     dc.Add(paths[i], Color.Red, i);
                 }
 #endif
-                SortedDictionary<BoundingRect, List<SimpleShape>> sortedshapes = new SortedDictionary<BoundingRect, List<SimpleShape>>();
-                for (int i = 0; i < paths.Length; ++i)
-                {
-                    if (paths[i].IsClosed)
-                    {
-                        SimpleShape ss = new SimpleShape(paths[i].MakeBorder());
-                        var _ssKey = ss.GetExtent();
-                        if (!sortedshapes.ContainsKey(_ssKey)) sortedshapes[_ssKey] = new List<SimpleShape>();
-                        sortedshapes[_ssKey].Add(ss);
-                    }
-                }
-                List<SimpleShape> sortedList = new List<SimpleShape>();
-                foreach (var _e in sortedshapes) sortedList.AddRange(_e.Value);
-                CompoundShape ccs = new CompoundShape(); // leer
-                while (sortedList.Count > 0)
-                {
-                    SimpleShape ss = sortedList[sortedList.Count - 1]; // das größte
-                    sortedList.RemoveAt(sortedList.Count - 1); // raus aus der Liste
-                    CompoundShape cs = new CompoundShape(ss);
-                    for (int i = sortedList.Count - 1; i >= 0; --i)
-                    {
-                        switch (SimpleShape.GetPosition(ss, sortedList[i]))
-                        {
-                            case SimpleShape.Position.firstcontainscecond:
-                                cs = cs - new CompoundShape(sortedList[i]);
-                                sortedList.RemoveAt(i);
-                                ss = cs.SimpleShapes[0]; // das wird ja nur für den Test verwendet. Problem bei "©", der äußere Ring enthält auch das "c"
-                                // cs sollte ja auch immer nur einfach sein, denn es werden nur ganz enthaltene SimpleShapes abgezogen
-                                break;
-                            default:
-                                // alle anderen werden nicht verwendet. Beim Überschneiden müsste man noch überlegen
-                                // z.B. Font raumTalk
-                                break;
-                        }
-                    }
-                    ccs = ccs + cs;
-                }
+                CompoundShape ccs = GlyphShapeBuilder.MakeShape(paths).Shape;
                 ShapeMiddelLine sm = new ShapeMiddelLine(ccs); // sm könnte hier noch einige Eigenschaften bekommen, die Größe des Zeichens ist 1!
                 sm.pointSize = 0.2; // Gesamtgröße ist 1
                 FontCharacteristics fc;

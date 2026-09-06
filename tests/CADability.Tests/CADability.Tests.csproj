@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0-windows</TargetFramework>
@@ -10,6 +10,9 @@
 
     <Platforms>AnyCPU;x64</Platforms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- signed with the CADability key, so that the InternalsVisibleTo("CADability.Tests") of CADability applies -->
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\..\CADability\CADabilityKey.snk</AssemblyOriginatorKeyFile>
   </PropertyGroup>
 
   <ItemGroup>
